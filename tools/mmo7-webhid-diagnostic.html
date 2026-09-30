@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Mad Catz M.M.O. 7+ — WebHID read-only diagnostic</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { --bg:#14161a; --panel:#1c2027; --line:#2c333d; --fg:#e6e9ee;
+          --dim:#98a2b3; --acc:#4da3ff; --warn:#ffb020; --ok:#3ddc84; }
+  * { box-sizing:border-box; }
+  body { margin:0; padding:24px; background:var(--bg); color:var(--fg);
+         font:14px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+  h1 { font-size:17px; margin:0 0 4px; }
+  h2 { font-size:13px; text-transform:uppercase; letter-spacing:.08em;
+       color:var(--dim); margin:24px 0 8px; }
+  .sub { color:var(--dim); margin-bottom:20px; }
+  .banner { border:1px solid var(--ok); background:#0f2417; color:#b7f5d2;
+            padding:12px 14px; border-radius:8px; margin-bottom:22px; }
+  .banner b { color:var(--ok); }
+  .card { background:var(--panel); border:1px solid var(--line);
+          border-radius:10px; padding:16px; margin-bottom:16px; }
+  button { background:var(--acc); color:#08121c; border:0; border-radius:6px;
+           padding:9px 16px; font:inherit; font-weight:600; cursor:pointer; }
+  button.ghost { background:transparent; color:var(--acc);
+                 border:1px solid var(--acc); }
+  button:disabled { opacity:.4; cursor:not-allowed; }
+  table { border-collapse:collapse; width:100%; font-size:13px; }
+  td, th { text-align:left; padding:5px 10px 5px 0; vertical-align:top;
+           border-bottom:1px solid var(--line); }
+  th { color:var(--dim); font-weight:400; }
+  pre { margin:6px 0 0; padding:10px; background:#0e1116; border-radius:6px;
+        overflow-x:auto; font-size:12.5px; border:1px solid var(--line);
+        white-space:pre; }
+  .row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+  .muted { color:var(--dim); }
+  .err { color:#ff7b72; }
+  .ok { color:var(--ok); }
+  .warn { color:var(--warn); }
+  code { background:#0e1116; padding:1px 5px; border-radius:4px; }
+</style>
+</head>
+<body>
+
+<h1>Mad Catz M.M.O. 7+ — WebHID read-only diagnostic</h1>
+<div class="sub">Protocol reconnaissance tool. Chrome / Edge / Opera only.</div>
+
+<div class="banner">
+  <b>THIS PAGE ONLY READS.</b> It calls <code>receiveFeatureReport()</code>
+  (HID GET_FEATURE) and never <code>sendFeatureReport()</code> (HID SET_FEATURE).
+  A GET_FEATURE control transfer cannot modify the mouse's stored settings, so
+  <b>this page cannot brick, misconfigure, or alter the mouse in any way.</b>
+  It does not touch firmware. Nothing is written to flash.
+</div>
+
+<div class="card">
+  <div class="row">
+    <button id="connect">Connect to mouse</button>
+    <button id="readall" class="ghost" disabled>Read all reports</button>
+    <button id="export" class="ghost" disabled>Export JSON</button>
+  </div>
+  <div id="status" class="muted" style="margin-top:12px">Not connected.</div>
+</div>
+
+<div id="out"></div>
+
+<div id="cheatsheet"></div>
+
+<script>
+"use strict";
+
+// ---------------------------------------------------------------------------
+// This tool deliberately implements ONLY receiveFeatureReport().
+// Do not add sendFeatureReport() here: a read-only tool cannot brick a device.
+// ---------------------------------------------------------------------------
+
+const VID = 0x0738;
+const KNOWN_PIDS = [0x0C19, 0x1C02];
+const EXPECTED = { 0x04:56, 0x05:15, 0x06:9, 0x07:8, 0x08:95, 0x09:131, 0x0C:10, 0x18:95 };
+const NAMES = { 0x04:"Sensor", 0x05:"Light", 0x06:"PollRate", 0x07:"WakeMode",
+                0x08:"Keys", 0x09:"Keys_Fn", 0x0C:"ProfileId", 0x18:"Macro" };
+
+const out = document.querySelector("#out");
+const statusEl = document.querySelector("#status");
+let device = null;
+const results = {};
+
+// ---- tiny DOM helpers (textContent only; never innerHTML) ------------------
+function el(tag, props, ...kids) {
+  const n = document.createElement(tag);
+  if (props) {
+    for (const key of Object.keys(props)) {
+      const v = props[key];
+      if (v === undefined || v === null) continue;
+      if (key === "class") n.className = v;
+      else if (key === "text") n.textContent = v;
+      else n.setAttribute(key, v);
+    }
+  }
+  for (const k of kids) if (k !== undefined && k !== null) n.append(k);
+  return n;
+}
+const span = (text, cls) => el("span", cls ? { class: cls, text } : { text });
+const pre  = (text) => el("pre", { text });
+
+function say(text, cls) {
+  statusEl.textContent = "";
+  statusEl.className = "";
+  statusEl.append(cls ? span(text, cls) : document.createTextNode(text));
+}
+
+function card(title, ...kids) {
+  const d = el("div", { class: "card" });
+  d.append(el("h2", { style: "margin-top:0", text: title }));
+  for (const k of kids) if (k !== undefined && k !== null) d.append(k);
+  out.append(d);
+  return d;
+}
+
+function kvTable(rows) {
+  const t = el("table");
+  for (const pair of rows) {
+    const tr = el("tr");
+    tr.append(el("th", { text: pair[0] }), el("td", {}, pair[1]));
+    t.append(tr);
+  }
+  return t;
+}
+
+// ---- hexdump ---------------------------------------------------------------
+function hexdump(bytes) {
+  const lines = [];
+  for (let i = 0; i < bytes.length; i += 16) {
+    const chunk = bytes.slice(i, i + 16);
+    const hex = Array.from(chunk, b => b.toString(16).padStart(2, "0")).join(" ");
+    const asc = Array.from(chunk,
+      b => (b >= 32 && b < 127) ? String.fromCharCode(b) : ".").join("");
+    lines.push(`${i.toString(16).padStart(3, "0")}  ${hex.padEnd(47)}  ${asc}`);
+  }
+  return lines.join("\n");
+}
+
+// ---- descriptor ------------------------------------------------------------
+function describeReport(r) {
+  const first = r.items && r.items.length ? r.items[0] : null;
+  let s = `reportId 0x${r.reportId.toString(16).padStart(2, "0")} (${r.reportId})  items=${r.items.length}`;
+  if (first) s += `  reportSize=${first.reportSize}  reportCount=${first.reportCount}`;
+  return s;
+}
+
+function reportBlock(label, reports) {
+  const d = el("div");
+  d.append(span(`${label}:`, "muted"));
+  d.append(pre(reports.length ? reports.map(describeReport).join("\n") : "  (none)"));
+  return d;
+}
+
+function dumpDescriptor(dev) {
+  if (!dev.collections.length) {
+    card("HID report descriptor", el("div", { class: "err", text: "No collections reported." }));
+    return;
+  }
+  const body = el("div");
+  dev.collections.forEach((c, i) => {
+    const d = el("div", { style: "margin-bottom:10px" });
+    d.append(el("b", { text: `collection ${i}` }));
+    d.append(span(`  usagePage=0x${c.usagePage.toString(16)}  usage=0x${c.usage.toString(16)}`, "muted"));
+    d.append(el("br"));
+    d.append(reportBlock("featureReports", c.featureReports));
+    d.append(reportBlock("inputReports", c.inputReports));
+    d.append(reportBlock("outputReports", c.outputReports));
+    body.append(d);
+  });
+
+  const unknown = [];
+  dev.collections.forEach(c => c.featureReports.forEach(r => {
+    if (!(r.reportId in EXPECTED) && r.reportId !== 0) unknown.push(r.reportId);
+  }));
+  body.append(unknown.length
+    ? el("div", { class: "warn", text: `Not in our table: ${unknown.map(x => "0x" + x.toString(16)).join(", ")}` })
+    : el("div", { class: "ok", text: "All declared feature report IDs match our table." }));
+
+  card("HID report descriptor (as the device declares it)", body);
+}
+
+// ---- the only device interaction ------------------------------------------
+async function readReport(id) {
+  const dv = await device.receiveFeatureReport(id);   // GET_FEATURE only
+  const bytes = new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength);
+  results["0x" + id.toString(16).padStart(2, "0")] = Array.from(bytes);
+  return bytes;
+}
+
+function analyse(id, bytes) {
+  const notes = [];
+  const exp = EXPECTED[id];
+
+  if (bytes.length === 1 && bytes[0] === 0) {
+    notes.push(span(`Returned a single zero byte — the device may not implement feature report 0x${id.toString(16)}.`, "warn"));
+    return notes;
+  }
+  const hasId = bytes[0] === id;
+  if (hasId) {
+    notes.push(span(`byte0 = 0x${id.toString(16)} — matches the expected report ID.`, "ok"));
+  } else {
+    notes.push(span(`byte0 = 0x${bytes[0].toString(16)} — expected 0x${id.toString(16)}; the returned buffer may omit the report ID.`, "warn"));
+  }
+  const lenCandidate = hasId ? bytes[1] : bytes[0];
+  notes.push(lenCandidate === exp
+    ? span(`length byte = ${lenCandidate} — matches expected ${exp}.`, "ok")
+    : span(`length byte = ${lenCandidate} — expected ${exp}.`, "warn"));
+
+  const off = hasId ? 2 : 1;
+  let checked = 0, bad = 0;
+  for (let i = off + 1; i + 1 < bytes.length; i += 2) {
+    checked++;
+    if (bytes[i + 1] !== ((~bytes[i]) & 0xff)) bad++;
+  }
+  if (checked && bad === 0) {
+    notes.push(span(`complement bytes: all ${checked} pairs valid.`, "ok"));
+  } else if (checked) {
+    notes.push(span(`complement bytes: ${bad}/${checked} pairs invalid (alignment may differ per command).`, "muted"));
+  }
+
+  if (id === 0x06) {
+    const rb = bytes[off];
+    if (rb > 0) notes.push(span(`poll-rate candidate: ${rb} -> ${Math.round(1000 / rb)} Hz`, "muted"));
+  }
+  return notes;
+}
+
+function renderReport(id, bytes) {
+  const name = NAMES[id] || "?";
+  const wrap = el("div");
+  wrap.append(pre(hexdump(bytes)));
+  const noteBox = el("div", { style: "margin-top:9px" });
+  for (const n of analyse(id, bytes)) noteBox.append(el("div", {}, n));
+  wrap.append(noteBox);
+  card(`0x${id.toString(16).padStart(2, "0")} — ${name} (${bytes.length} bytes)`, wrap);
+}
+
+// ---- reference card --------------------------------------------------------
+function buildCheatsheet() {
+  const body = el("div");
+  body.append(kvTable([
+    ["VID / PID", el("span", { text: "0x0738 + 0x0C19 (wired), 0x1C02 (2.4 GHz dongle)" })],
+    ["Report IDs", el("span", { text: "0x04 0x05 0x06 0x07 0x08 0x09 0x0C 0x18" })],
+    ["Declared lengths", el("span", { text: "8, 9, 10, 15, 56, 95, 95, 131 bytes" })],
+    ["Framing", el("span", { text: "byte0 = report ID, byte1 = length, then each data byte followed by its bitwise complement" })],
+    ["Poll-rate encoding", el("span", { text: "byte = 1000 / Hz  (125->8, 250->4, 500->2, 1000->1)" })]
+  ]));
+  body.append(el("div", { class: "muted", style: "margin-top:12px",
+    text: "This run tells us: the real report IDs and sizes from the descriptor (our biggest unknown), whether the two-byte header holds in the read direction, and whether the returned buffer includes the report ID as a leading byte." }));
+  const d = el("div", { class: "card" });
+  d.append(el("h2", { style: "margin-top:0", text: "What we already know (from the Windows DLL)" }));
+  d.append(body);
+  document.querySelector("#cheatsheet").append(d);
+}
+buildCheatsheet();
+
+// ---- wiring ----------------------------------------------------------------
+document.querySelector("#connect").onclick = async () => {
+  try {
+    out.textContent = "";
+    if (!("hid" in navigator)) {
+      say("WebHID is not available. Use Chrome, Edge or Opera (not Firefox).", "err");
+      return;
+    }
+    const devs = await navigator.hid.requestDevice({ filters: [{ vendorId: VID }] });
+    if (!devs.length) { say("No device selected.", "warn"); return; }
+    device = devs[0];
+    if (!device.opened) await device.open();
+
+    say(`Connected: ${device.productName || "(no name)"} — ` +
+        `VID 0x${device.vendorId.toString(16)} PID 0x${device.productId.toString(16)}`, "ok");
+
+    const statusCell = KNOWN_PIDS.includes(device.productId)
+      ? span(device.productId === 0x0C19 ? "recognised (wired)" : "recognised (2.4 GHz dongle)", "ok")
+      : span("unexpected PID — please report it", "warn");
+
+    card("Device", kvTable([
+      ["productName", el("span", { text: device.productName || "(empty)" })],
+      ["vendorId", el("span", { text: "0x" + device.vendorId.toString(16) })],
+      ["productId", el("span", { text: "0x" + device.productId.toString(16) })],
+      ["status", statusCell]
+    ]));
+    dumpDescriptor(device);
+    document.querySelector("#readall").disabled = false;
+    document.querySelector("#export").disabled = false;
+  } catch (e) {
+    say("Connect failed: " + e.message, "err");
+  }
+};
+
+document.querySelector("#readall").onclick = async () => {
+  if (!device) return;
+  const btn = document.querySelector("#readall");
+  btn.disabled = true;
+  const ids = Object.keys(EXPECTED).map(Number).sort((a, b) => a - b);
+  for (const id of ids) {
+    try {
+      renderReport(id, await readReport(id));
+    } catch (e) {
+      card(`0x${id.toString(16).padStart(2, "0")} — ${NAMES[id] || "?"}`,
+        el("div", { class: "err", text: "read failed: " + e.message }));
+    }
+  }
+  say("Read-only sweep complete. Nothing was written to the mouse.", "ok");
+  btn.disabled = false;
+};
+
+document.querySelector("#export").onclick = async () => {
+  const payload = {
+    productName: device ? device.productName : null,
+    vendorId: device ? device.vendorId : null,
+    productId: device ? device.productId : null,
+    collections: device ? device.collections.map(c => ({
+      usagePage: c.usagePage, usage: c.usage, type: c.type,
+      feature: c.featureReports.map(r => r.reportId),
+      input: c.inputReports.map(r => r.reportId),
+      output: c.outputReports.map(r => r.reportId)
+    })) : [],
+    responses: results
+  };
+  const text = JSON.stringify(payload, null, 2);
+  try {
+    await navigator.clipboard.writeText(text);
+    say("JSON copied to clipboard.", "ok");
+  } catch {
+    card("Export", pre(text));
+  }
+};
+</script>
+</body>
+</html>
