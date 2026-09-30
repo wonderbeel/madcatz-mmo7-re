@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Mad Catz M.M.O. 7+ — protocol research &amp; read-only probe</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="Reverse engineering research for the Mad Catz M.M.O. 7+ wireless mouse, plus a read-only WebHID probe for hardware owners.">
+<style>
+  :root { --bg:#14161a; --panel:#1c2027; --line:#2c333d; --fg:#e6e9ee;
+          --dim:#98a2b3; --acc:#4da3ff; --ok:#3ddc84; --warn:#ffb020; }
+  * { box-sizing:border-box; }
+  body { margin:0; padding:32px 20px 64px; background:var(--bg); color:var(--fg);
+         font:15px/1.6 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+  .wrap { max-width:760px; margin:0 auto; }
+  h1 { font-size:22px; margin:0 0 6px; line-height:1.3; }
+  h2 { font-size:13px; text-transform:uppercase; letter-spacing:.09em;
+       color:var(--dim); margin:32px 0 10px; }
+  .sub { color:var(--dim); margin-bottom:26px; }
+  .card { background:var(--panel); border:1px solid var(--line);
+          border-radius:10px; padding:18px 20px; margin-bottom:16px; }
+  .cta { display:block; background:var(--acc); color:#08121c; text-decoration:none;
+         font-weight:700; text-align:center; padding:16px 20px; border-radius:9px;
+         font-size:16px; margin:8px 0 10px; }
+  .cta:hover { filter:brightness(1.1); }
+  .cta small { display:block; font-weight:400; opacity:.8; font-size:12.5px;
+               margin-top:4px; }
+  .safe { border:1px solid var(--ok); background:#0f2417; color:#b7f5d2;
+          padding:14px 16px; border-radius:9px; margin-bottom:16px; }
+  .safe b { color:var(--ok); }
+  code { background:#0e1116; padding:1px 6px; border-radius:4px; font-size:13px; }
+  pre { background:#0e1116; border:1px solid var(--line); border-radius:7px;
+        padding:12px; overflow-x:auto; font-size:13px; }
+  ol, ul { padding-left:22px; }
+  li { margin:5px 0; }
+  table { border-collapse:collapse; width:100%; font-size:14px; }
+  td { padding:6px 12px 6px 0; border-bottom:1px solid var(--line);
+       vertical-align:top; }
+  td:first-child { color:var(--dim); white-space:nowrap; }
+  a { color:var(--acc); }
+  .muted { color:var(--dim); }
+  .foot { margin-top:34px; color:var(--dim); font-size:12.5px;
+          border-top:1px solid var(--line); padding-top:14px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>Mad Catz M.M.O. 7+ — protocol research</h1>
+  <div class="sub">
+    Reverse engineering the M.M.O. 7+ so it can be configured on Linux and in the
+    browser, without the vendor's Windows-only software.
+  </div>
+
+  <div class="safe">
+    <b>Reading only — the probe below cannot damage your mouse.</b><br>
+    It issues HID <code>GET_FEATURE</code> requests and never
+    <code>SET_FEATURE</code>. A read transfer cannot modify stored settings, so it
+    cannot brick or reconfigure anything. It does not touch firmware. The vendor's
+    own <code>Query*</code> functions were verified to use
+    <code>HidD_GetFeature</code> only, with zero write calls.
+  </div>
+
+  <h2>For M.M.O. 7+ owners</h2>
+  <div class="card">
+    <a class="cta" href="tools/mmo7-webhid-diagnostic.html">
+      Run the read-only diagnostic
+      <small>Chrome, Edge or Opera required — WebHID does not exist in Firefox</small>
+    </a>
+    <ol>
+      <li>Click the button above and connect the mouse (try USB-C <em>and</em> the
+          2.4 GHz dongle — they have different product IDs)</li>
+      <li>Click <strong>Read all reports</strong></li>
+      <li>Click <strong>Export JSON</strong> (copies a report to your clipboard)</li>
+    </ol>
+    <p class="muted" style="margin-bottom:0">
+      Then share that JSON, plus your OS, browser version, which connection you
+      used, and whether the device appeared in the picker at all. If the picker is
+      empty, that is a useful finding too.
+    </p>
+  </div>
+
+  <h2>What this is testing</h2>
+  <div class="card">
+    <p style="margin-top:0">
+      Everything in this project comes from <strong>static analysis</strong> of the
+      vendor's own Windows drivers. None of it has been checked against real
+      hardware. The probe answers the four questions that block everything else:
+    </p>
+    <table>
+      <tr><td>Q1</td><td>What report IDs and sizes does the device actually declare?</td></tr>
+      <tr><td>Q2</td><td>Does a response echo the report ID, or is the buffer shifted?</td></tr>
+      <tr><td>Q3</td><td>Is byte 1 really a length field?</td></tr>
+      <tr><td>Q4</td><td>Do the complement/integrity bytes validate on read?</td></tr>
+    </table>
+    <p class="muted" style="margin-bottom:0">
+      Q4 matters most: if the device validates that integrity scheme, it likely
+      rejects malformed writes too — which makes any future write support much safer.
+    </p>
+  </div>
+
+  <h2>Findings</h2>
+  <div class="card">
+    <table>
+      <tr><td><a href="https://github.com/wonderbeel/madcatz-mmo7-re/blob/main/README.md">README</a></td>
+          <td>Summary table with a confidence level on every claim</td></tr>
+      <tr><td><a href="https://github.com/wonderbeel/madcatz-mmo7-re/blob/main/PROTOCOL.md">PROTOCOL</a></td>
+          <td>Transport, USB IDs, framing, the 8-command table, all 28 driver export RVAs</td></tr>
+      <tr><td><a href="https://github.com/wonderbeel/madcatz-mmo7-re/blob/main/STRUCTURES.md">STRUCTURES</a></td>
+          <td>The .NET structs and enums that define payload layouts</td></tr>
+      <tr><td><a href="https://github.com/wonderbeel/madcatz-mmo7-re/blob/main/OPEN-QUESTIONS.md">OPEN QUESTIONS</a></td>
+          <td>Everything unverified, and what would falsify each hypothesis</td></tr>
+      <tr><td><a href="https://github.com/wonderbeel/madcatz-mmo7-re/blob/main/FIRMWARE.md">FIRMWARE</a></td>
+          <td>Firmware manifest analysis — and why flashing is the risky one</td></tr>
+      <tr><td><a href="https://github.com/wonderbeel/madcatz-mmo7-re/blob/main/PLATFORM.md">PLATFORM</a></td>
+          <td>Linux status, WebHID/Wine viability, capture setup, fallback hardware</td></tr>
+      <tr><td><a href="https://github.com/wonderbeel/madcatz-mmo7-re/blob/main/METHOD.md">METHOD</a></td>
+          <td>Provenance, file hashes, reproduction commands</td></tr>
+    </table>
+  </div>
+
+  <h2>Please don't flash firmware</h2>
+  <div class="card">
+    <p style="margin:0">
+      The firmware transfer protocol has <strong>not</strong> been reverse
+      engineered, and a failed flash has no confirmed recovery path — the vendor's
+      recovery tool is Windows-only and talks to running firmware over HID. Firmware
+      images are a public download if you want to update, but do that on Windows or
+      in a VM for now.
+    </p>
+  </div>
+
+  <div class="foot">
+    Unofficial community research. Not affiliated with or endorsed by Mad Catz.<br>
+    Derived from publicly distributed vendor software and open-source projects;
+    no vendor binaries or firmware images are redistributed here.
+  </div>
+
+</div>
+</body>
+</html>

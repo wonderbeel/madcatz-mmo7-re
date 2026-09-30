@@ -1,0 +1,9 @@
+---
+title: Mad Catz M.M.O. 7+ reverse engineering
+description: >-
+  Protocol research for the Mad Catz M.M.O. 7+ wireless mouse, and a read-only
+  WebHID probe for hardware owners.
+markdown: kramdown
+kramdown:
+  input: GFM
+  hard_wrap: false
