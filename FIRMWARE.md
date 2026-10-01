@@ -39,16 +39,29 @@ That zip contains five firmware versions, the dedicated updater, and `hidapi.dll
 | `MMO7+_FW_v1.22.bin` | 124,668 | `66da4d6da03a2226` |
 | `MMO7+_FW_Updater.exe` | 11,214,848 | `c50c1f9f7ed092b3` |
 | `hidapi.dll` | 86,016 | `9dd6e0a1e36607d0` |
+| `run1.bat` | 56 | `8df6a9e5455e4498` |
+| `使用说明.txt` | 734 | `ed8d1b56c479a8f8` |
 
 **Consequence:** you do **not** need to extract firmware from the vendor binary.
 Official images are a normal download.
 
-### ⚠️ The published SHA-256 is wrong
+### The published SHA-256 is correct — it hashes the archive
 
-The manifest's `sha256` value `7f69c620…` **matches none of the files in the zip** —
-not the `.bin`, not the `.exe`, not the `hidapi.dll`. The vendor's own integrity
-hash is stale or refers to something else. **Do not enforce it** in any client:
-it would reject every genuine update.
+The manifest's `sha256` is the SHA-256 of the **downloaded archive at `url`**, not of
+the files inside it. It verifies:
+
+```text
+manifest "sha256"            = 7f69c620a4d3c423f62f6f1fce526ce329d21cbd36a1f2fe94c8cfa9d9539a1d
+sha256(MMO7+_Fw_Updater.zip) = 7f69c620a4d3c423f62f6f1fce526ce329d21cbd36a1f2fe94c8cfa9d9539a1d
+```
+
+So the manifest is internally consistent, and a client **should** verify the
+downloaded `.zip` against it before extracting.
+
+> An earlier revision of this document called this hash stale and advised clients
+> not to enforce it. That was wrong — it compared the manifest against the hashes of
+> the *extracted* zip contents (the table above) instead of the archive itself.
+> Those per-file hashes were always correct; they answer a different question.
 
 Also note the version progression is three releases in ~8 months
 (v1.16 → v1.22), so firmware updates are infrequent.

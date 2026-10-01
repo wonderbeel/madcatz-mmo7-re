@@ -16,6 +16,7 @@ layouts, for interoperability purposes.
 | --- | --- |
 | Name | `M.M.O. 7+ Software and Support Package (2026-9-14)-B.rar` |
 | Size | 80,570,988 bytes |
+| sha256 | `52c8fffbd2e0bcad694cb4412a48d117bd01908ffa9908b5d69190e1d8cac5b9` |
 | URL | `https://www.madcatz.com/FileUploads/SupportFile/M.M.O.%207+%20Software%20and%20Support%20Package.rar` |
 | Linked from | `https://www.madcatz.com/En/Support/Downloads` (product id `1048`) |
 
@@ -47,8 +48,13 @@ M.M.O. 7+ Software and Support Package (2026-9-14)-B/
 | Property | Value |
 | --- | --- |
 | Manifest | `https://mcz_global.gitlab.io/allinone/MMO7+/fwupdate.json` (HTTP 308 → GitLab Pages host) |
-| Archive | `https://mcz_global.gitlab.io/allinone/MMO7+/MMO7+_Fw_Updater.zip` |
-| Contains | `MMO7+_FW_v1.{16,19,20,21,22}.bin`, `MMO7+_FW_Updater.exe` (11,214,848 B), `hidapi.dll` |
+| Archive | `https://mcz_global.gitlab.io/allinone/MMO7+/MMO7+_Fw_Updater.zip` — 4,512,969 bytes |
+| Archive sha256 | `7f69c620a4d3c423f62f6f1fce526ce329d21cbd36a1f2fe94c8cfa9d9539a1d` — **this is what the manifest's `sha256` field holds** (see `FIRMWARE.md` §1) |
+| Contains | `MMO7+_FW_v1.{16,19,20,21,22}.bin`, `MMO7+_FW_Updater.exe` (11,214,848 B), `hidapi.dll`, `run1.bat`, `使用说明.txt` |
+
+Both hosts are brand-scoped vendor URLs (`madcatz.com` CMS uploads, a per-project
+GitLab Pages subdomain) and may disappear if the brand ceases operation. The sizes
+and hashes above are the durable identifiers; re-verify them against any mirror.
 
 ### Extracted artifact identities
 
@@ -145,6 +151,7 @@ objdump -d --start-address=0x10003f60 --stop-address=0x10004070 -M intel "$D"   
 ```bash
 curl -sL 'https://mcz_global.gitlab.io/allinone/MMO7+/fwupdate.json'
 curl -sL -o fw.zip 'https://mcz_global.gitlab.io/allinone/MMO7+/MMO7+_Fw_Updater.zip'
+sha256sum fw.zip        # must equal the manifest's "sha256" field (archive, not contents)
 unzip fw.zip && sha256sum MMO7+_Fw_Updater/MMO7+_FW_v1.22.bin
 ```
 
@@ -163,7 +170,7 @@ unzip fw.zip && sha256sum MMO7+_Fw_Updater/MMO7+_FW_v1.22.bin
 | Struct and enum names | `dnfile` metadata on `mcz.allinone.devices.dll` |
 | No obfuscation | `grep -a` for ConfuserEx / Eazfuscator / SmartAssembly / `.NET Reactor` / Dotfuscator |
 | Firmware is raw ARM | first bytes `18 f0 9f e5` = `LDR PC,[PC,#0x18]`; readable strings present |
-| Manifest hash mismatch | `sha256sum` every file in the zip vs the manifest's `sha256` |
+| Manifest hash verifies | `sha256sum` the downloaded `.zip` (not its extracted contents) vs the manifest's `sha256` |
 | WebHID report-size handling | `services/device/hid/hid_connection_linux.cc` — `max_feature_report_size() + 1` |
 
 ---
