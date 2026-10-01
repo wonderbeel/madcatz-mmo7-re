@@ -155,7 +155,10 @@ Open `http://localhost:8000/mmo7-webhid-diagnostic.html`, then:
 1. **Connect to mouse** → select the M.M.O. 7+ (try both USB-C and the 2.4 GHz
    dongle if you have both)
 2. **Read all reports**
-3. **Export JSON** (copies to clipboard)
+3. **Download JSON file** (saves to disk; the clipboard button is a fallback)
+
+For a field unit you only have for a short window, follow `../RUNBOOK.md` — it
+covers laptop setup, permissions, and the wired/dongle run order.
 
 The tool records the descriptor, every response as hex, and its own verdict on
 whether byte 0 matches, whether the length matches, and whether the complement

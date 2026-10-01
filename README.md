@@ -63,6 +63,7 @@ Legend: **Proven** = directly observed in binaries/metadata.
 | `PLATFORM.md` | Linux reality: libratbag, WebHID, permissions, Wine, hardware alternatives |
 | `FIRMWARE.md` | Firmware manifest, image analysis, and why flashing is the risky one |
 | `METHOD.md` | How this was derived, and how to reproduce/verify it |
+| `RUNBOOK.md` | Laptop setup + the step-by-step hardware session (short, borrowed-unit friendly) |
 | `tools/mmo7-webhid-diagnostic.html` | **Read-only** WebHID probe — safe to run, cannot write |
 
 ---
@@ -77,11 +78,12 @@ It **cannot modify your mouse** — it only issues HID GET_FEATURE requests
 # Chrome / Edge / Opera required (WebHID does not exist in Firefox)
 cd tools && python3 -m http.server 8000
 # open http://localhost:8000/mmo7-webhid-diagnostic.html
-# click "Connect to mouse" -> pick the M.M.O. 7+ -> "Read all reports" -> "Export JSON"
+# click "Connect to mouse" -> pick the M.M.O. 7+ -> "Read all reports" -> "Download JSON file"
 ```
 
 That answers the four biggest unknowns in one go (`OPEN-QUESTIONS.md` #1–#4).
-If you'd rather do it from a terminal, `python3` + `hidapi` works too.
+Step-by-step setup, including permissions and the wired/dongle runs, is in
+`RUNBOOK.md`. If you'd rather do it from a terminal, `python3` + `hidapi` works too.
 
 **Please don't flash firmware** on the strength of this document. Nothing here
 describes the flash sequence, and a failed flash has no confirmed recovery path.

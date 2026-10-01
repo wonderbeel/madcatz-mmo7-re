@@ -37,12 +37,16 @@
   .ok { color:var(--ok); }
   .warn { color:var(--warn); }
   code { background:#0e1116; padding:1px 5px; border-radius:4px; }
+  label.chk { display:flex; gap:8px; align-items:center; color:var(--dim);
+              font-size:12.5px; }
+  .pill { display:inline-block; padding:1px 7px; border-radius:999px;
+          border:1px solid var(--line); font-size:12px; }
 </style>
 </head>
 <body>
 
 <h1>Mad Catz M.M.O. 7+ — WebHID read-only diagnostic</h1>
-<div class="sub">Protocol reconnaissance tool. Chrome / Edge / Opera only.</div>
+<div class="sub">Protocol reconnaissance tool. Chromium only (Chrome / Edge / Opera). Works fully offline.</div>
 
 <div class="banner">
   <b>THIS PAGE ONLY READS.</b> It calls <code>receiveFeatureReport()</code>
@@ -50,19 +54,23 @@
   A GET_FEATURE control transfer cannot modify the mouse's stored settings, so
   <b>this page cannot brick, misconfigure, or alter the mouse in any way.</b>
   It does not touch firmware. Nothing is written to flash.
+  The write APIs are additionally shadowed at runtime (see <code>enforceReadOnly()</code>).
 </div>
 
 <div class="card">
   <div class="row">
     <button id="connect">Connect to mouse</button>
     <button id="readall" class="ghost" disabled>Read all reports</button>
-    <button id="export" class="ghost" disabled>Export JSON</button>
+  </div>
+  <div class="row" style="margin-top:10px">
+    <label class="chk"><input type="checkbox" id="anyvid"> show <em>all</em> HID devices (escape hatch if the picker is empty)</label>
   </div>
   <div id="status" class="muted" style="margin-top:12px">Not connected.</div>
 </div>
 
+<div id="runsbar"></div>
 <div id="out"></div>
-
+<div id="exportbar"></div>
 <div id="cheatsheet"></div>
 
 <script>
@@ -70,19 +78,51 @@
 
 // ---------------------------------------------------------------------------
 // This tool deliberately implements ONLY receiveFeatureReport().
-// Do not add sendFeatureReport() here: a read-only tool cannot brick a device.
+// Do not add sendFeatureReport() / sendReport() here: a read-only tool cannot
+// brick a device, and that property is the whole justification for running this
+// on borrowed hardware. enforceReadOnly() below makes the guarantee explicit.
 // ---------------------------------------------------------------------------
 
-const VID = 0x0738;
-const KNOWN_PIDS = [0x0C19, 0x1C02];
+const VID = 0x0738;                                     // Mad Catz / Saitek
+const KNOWN_PIDS = {
+  0x0C19: "wired",
+  0x1C02: "2.4 GHz dongle"
+};
+// command id -> declared payload length, from PROTOCOL.md section 4
 const EXPECTED = { 0x04:56, 0x05:15, 0x06:9, 0x07:8, 0x08:95, 0x09:131, 0x0C:10, 0x18:95 };
 const NAMES = { 0x04:"Sensor", 0x05:"Light", 0x06:"PollRate", 0x07:"WakeMode",
                 0x08:"Keys", 0x09:"Keys_Fn", 0x0C:"ProfileId", 0x18:"Macro" };
 
+const READ_TIMEOUT_MS = 3000;   // a bad report ID must not hang the whole sweep
+const MAX_TARGETS = 32;         // backstop if a descriptor declares a huge range
+
 const out = document.querySelector("#out");
 const statusEl = document.querySelector("#status");
+const runsbar = document.querySelector("#runsbar");
+const exportbar = document.querySelector("#exportbar");
+
 let device = null;
-const results = {};
+const runs = [];        // one entry per connect; wired and dongle both survive
+let current = null;
+
+// ---- read-only enforcement -------------------------------------------------
+function enforceReadOnly() {
+  // Belt and braces: if the write APIs exist on this page, make them throw.
+  // We never call them; this guarantees no future edit can quietly write.
+  try {
+    if (typeof HIDDevice !== "undefined" && HIDDevice.prototype) {
+      for (const fn of ["sendFeatureReport", "sendReport"]) {
+        if (fn in HIDDevice.prototype) {
+          Object.defineProperty(HIDDevice.prototype, fn, {
+            configurable: true,
+            value() { throw new Error(`refused: ${fn}() is a write API and this tool is read-only`); }
+          });
+        }
+      }
+    }
+  } catch (e) { /* non-fatal: we still never call these */ }
+}
+enforceReadOnly();
 
 // ---- tiny DOM helpers (textContent only; never innerHTML) ------------------
 function el(tag, props, ...kids) {
@@ -126,23 +166,34 @@ function kvTable(rows) {
   return t;
 }
 
+function hex(b) { return "0x" + b.toString(16).padStart(2, "0"); }
+
 // ---- hexdump ---------------------------------------------------------------
 function hexdump(bytes) {
   const lines = [];
   for (let i = 0; i < bytes.length; i += 16) {
     const chunk = bytes.slice(i, i + 16);
-    const hex = Array.from(chunk, b => b.toString(16).padStart(2, "0")).join(" ");
-    const asc = Array.from(chunk,
+    const h = Array.from(chunk, b => b.toString(16).padStart(2, "0")).join(" ");
+    const a = Array.from(chunk,
       b => (b >= 32 && b < 127) ? String.fromCharCode(b) : ".").join("");
-    lines.push(`${i.toString(16).padStart(3, "0")}  ${hex.padEnd(47)}  ${asc}`);
+    lines.push(`${i.toString(16).padStart(3, "0")}  ${h.padEnd(47)}  ${a}`);
   }
   return lines.join("\n");
+}
+
+// ---- timeout wrapper -------------------------------------------------------
+function withTimeout(promise, ms) {
+  let t;
+  const timeout = new Promise((_, rej) => {
+    t = setTimeout(() => rej(new Error(`no response after ${ms} ms`)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(t));
 }
 
 // ---- descriptor ------------------------------------------------------------
 function describeReport(r) {
   const first = r.items && r.items.length ? r.items[0] : null;
-  let s = `reportId 0x${r.reportId.toString(16).padStart(2, "0")} (${r.reportId})  items=${r.items.length}`;
+  let s = `reportId ${hex(r.reportId)} (${r.reportId})  items=${r.items.length}`;
   if (first) s += `  reportSize=${first.reportSize}  reportCount=${first.reportCount}`;
   return s;
 }
@@ -154,6 +205,21 @@ function reportBlock(label, reports) {
   return d;
 }
 
+function collectDescriptor(dev) {
+  return dev.collections.map(c => ({
+    usagePage: c.usagePage,
+    usage: c.usage,
+    type: c.type,
+    featureReports: c.featureReports.map(r => ({
+      reportId: r.reportId, items: r.items.length,
+      reportSize: r.items.length ? r.items[0].reportSize : null,
+      reportCount: r.items.length ? r.items[0].reportCount : null
+    })),
+    inputReports: c.inputReports.map(r => r.reportId),
+    outputReports: c.outputReports.map(r => r.reportId)
+  }));
+}
+
 function dumpDescriptor(dev) {
   if (!dev.collections.length) {
     card("HID report descriptor", el("div", { class: "err", text: "No collections reported." }));
@@ -163,7 +229,7 @@ function dumpDescriptor(dev) {
   dev.collections.forEach((c, i) => {
     const d = el("div", { style: "margin-bottom:10px" });
     d.append(el("b", { text: `collection ${i}` }));
-    d.append(span(`  usagePage=0x${c.usagePage.toString(16)}  usage=0x${c.usage.toString(16)}`, "muted"));
+    d.append(span(`  usagePage=${hex(c.usagePage)}  usage=${hex(c.usage)}`, "muted"));
     d.append(el("br"));
     d.append(reportBlock("featureReports", c.featureReports));
     d.append(reportBlock("inputReports", c.inputReports));
@@ -171,71 +237,226 @@ function dumpDescriptor(dev) {
     body.append(d);
   });
 
-  const unknown = [];
-  dev.collections.forEach(c => c.featureReports.forEach(r => {
-    if (!(r.reportId in EXPECTED) && r.reportId !== 0) unknown.push(r.reportId);
-  }));
+  const declared = declaredFeatureIds(dev);
+  const known = declared.filter(id => id in EXPECTED);
+  const unknown = declared.filter(id => !(id in EXPECTED));
   body.append(unknown.length
-    ? el("div", { class: "warn", text: `Not in our table: ${unknown.map(x => "0x" + x.toString(16)).join(", ")}` })
-    : el("div", { class: "ok", text: "All declared feature report IDs match our table." }));
+    ? el("div", { class: "warn", text:
+        `Declared but NOT in our 8-command table: ${unknown.map(hex).join(", ")} ` +
+        `(we will read these too — this is Q8)` })
+    : el("div", { class: "ok", text: "Every declared feature report ID is in our table." }));
+  body.append(el("div", { class: "muted", style: "margin-top:6px", text:
+    `Declared feature IDs (${declared.length}): ${declared.length ? declared.map(hex).join(" ") : "(none)"}` }));
+  if (declared.some(id => id === 0)) {
+    body.append(el("div", { class: "warn", style: "margin-top:6px", text:
+      "Report ID 0 is declared — that is the single-unnumbered-report case OPEN-QUESTIONS.md says would falsify the model." }));
+  }
 
   card("HID report descriptor (as the device declares it)", body);
+  return { declared, known, unknown };
+}
+
+function declaredFeatureIds(dev) {
+  const s = new Set();
+  dev.collections.forEach(c => c.featureReports.forEach(r => s.add(r.reportId)));
+  return Array.from(s).sort((a, b) => a - b);
 }
 
 // ---- the only device interaction ------------------------------------------
 async function readReport(id) {
-  const dv = await device.receiveFeatureReport(id);   // GET_FEATURE only
-  const bytes = new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength);
-  results["0x" + id.toString(16).padStart(2, "0")] = Array.from(bytes);
-  return bytes;
+  const dv = await withTimeout(device.receiveFeatureReport(id), READ_TIMEOUT_MS);
+  return new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength);
+}
+
+// Discard trailing zero padding before judging complement pairs: a zero run
+// trivially fails the ~pair test and would otherwise swamp the answer to Q4.
+function lastNonZero(bytes) {
+  let last = bytes.length - 1;
+  while (last > 0 && bytes[last] === 0) last--;
+  return last;
+}
+
+function complementStats(bytes, start) {
+  let checked = 0, ok = 0;
+  const last = lastNonZero(bytes);
+  for (let i = start; i + 1 <= last; i += 2) {
+    checked++;
+    if (bytes[i + 1] === ((~bytes[i]) & 0xff)) ok++;
+  }
+  return { checked, ok };
 }
 
 function analyse(id, bytes) {
-  const notes = [];
-  const exp = EXPECTED[id];
+  const v = { reportId: id, byteLength: bytes.length, expectedLength: EXPECTED[id] ?? null };
 
+  if (bytes.length === 0) {
+    v.verdict = "empty"; v.notes = ["zero-length response"];
+    return v;
+  }
   if (bytes.length === 1 && bytes[0] === 0) {
-    notes.push(span(`Returned a single zero byte — the device may not implement feature report 0x${id.toString(16)}.`, "warn"));
-    return notes;
+    v.verdict = "single-zero-byte";
+    v.notes = [`returned a single 0x00 — report ${hex(id)} may be unimplemented`];
+    return v;
   }
-  const hasId = bytes[0] === id;
-  if (hasId) {
-    notes.push(span(`byte0 = 0x${id.toString(16)} — matches the expected report ID.`, "ok"));
-  } else {
-    notes.push(span(`byte0 = 0x${bytes[0].toString(16)} — expected 0x${id.toString(16)}; the returned buffer may omit the report ID.`, "warn"));
-  }
-  const lenCandidate = hasId ? bytes[1] : bytes[0];
-  notes.push(lenCandidate === exp
-    ? span(`length byte = ${lenCandidate} — matches expected ${exp}.`, "ok")
-    : span(`length byte = ${lenCandidate} — expected ${exp}.`, "warn"));
 
-  const off = hasId ? 2 : 1;
-  let checked = 0, bad = 0;
-  for (let i = off + 1; i + 1 < bytes.length; i += 2) {
-    checked++;
-    if (bytes[i + 1] !== ((~bytes[i]) & 0xff)) bad++;
-  }
-  if (checked && bad === 0) {
-    notes.push(span(`complement bytes: all ${checked} pairs valid.`, "ok"));
-  } else if (checked) {
-    notes.push(span(`complement bytes: ${bad}/${checked} pairs invalid (alignment may differ per command).`, "muted"));
-  }
+  // Hypothesis A: the returned buffer includes the report ID as byte 0.
+  // Hypothesis B: it does not (Chrome/hidapi have differed historically — Q2).
+  const withId = bytes[0] === id;
+  v.byte0 = bytes[0];
+  v.byte0MatchesReportId = withId;
+
+  const lenWithId = bytes.length > 1 ? bytes[1] : null;
+  const lenNoId   = bytes[0];
+  v.lengthByteWithId = lenWithId;
+  v.lengthByteNoId   = lenNoId;
+  v.lengthWithIdMatches = lenWithId === v.expectedLength;
+  v.lengthNoIdMatches   = lenNoId === v.expectedLength;
+
+  // Say which framing the response looks like, rather than assuming.
+  if (withId)                      v.framing = "includes-report-id";
+  else if (v.lengthNoIdMatches)    v.framing = "omits-report-id";
+  else                             v.framing = "unclear";
+
+  // Complement pairs, tried under both framings.
+  const csA = complementStats(bytes, 2);   // [id][len][d0][~d0][d1][~d1]...
+  const csB = complementStats(bytes, 1);   // [len][d0][~d0][d1][~d1]...
+  v.complement = {
+    withId: csA, omitId: csB,
+    allValidWithId: csA.checked > 0 && csA.ok === csA.checked,
+    allValidOmitId: csB.checked > 0 && csB.ok === csB.checked
+  };
+  v.complementEnforcedOnRead =
+    v.complement.allValidWithId || v.complement.allValidOmitId;
 
   if (id === 0x06) {
-    const rb = bytes[off];
-    if (rb > 0) notes.push(span(`poll-rate candidate: ${rb} -> ${Math.round(1000 / rb)} Hz`, "muted"));
+    const rb = withId ? bytes[2] : bytes[1];
+    v.pollRateRaw = rb;
+    v.pollRateHzIfEncodingHolds = rb > 0 ? Math.round(1000 / rb) : null;
   }
-  return notes;
+
+  const notes = [];
+  notes.push(withId
+    ? `byte0 = ${hex(bytes[0])} — matches the requested report ID (Q2: buffer includes it).`
+    : `byte0 = ${hex(bytes[0])} — expected ${hex(id)}; buffer may omit the report ID (Q2).`);
+  notes.push(v.lengthWithIdMatches || v.lengthNoIdMatches
+    ? `length byte = ${v.lengthWithIdMatches ? lenWithId : lenNoId} — matches expected ${v.expectedLength} (Q3).`
+    : `length byte = ${lenWithId} (with-id) / ${lenNoId} (no-id) — expected ${v.expectedLength} (Q3).`);
+  if (csA.checked || csB.checked) {
+    notes.push(v.complementEnforcedOnRead
+      ? `complement pairs validate (Q4: the device appears to enforce the scheme).`
+      : `complement pairs do NOT validate under either framing (Q4: likely Windows-driver-only padding).`);
+  } else {
+    notes.push("no complement pairs to check (response is too short).");
+  }
+  v.notes = notes;
+  v.verdict = v.lengthWithIdMatches || v.lengthNoIdMatches ? "framing-consistent" : "framing-unclear";
+  return v;
 }
 
-function renderReport(id, bytes) {
-  const name = NAMES[id] || "?";
+function renderReport(id, bytes, v) {
+  const name = NAMES[id] || "not in our table";
   const wrap = el("div");
   wrap.append(pre(hexdump(bytes)));
   const noteBox = el("div", { style: "margin-top:9px" });
-  for (const n of analyse(id, bytes)) noteBox.append(el("div", {}, n));
+  for (const n of v.notes) noteBox.append(el("div", {}, n));
   wrap.append(noteBox);
-  card(`0x${id.toString(16).padStart(2, "0")} — ${name} (${bytes.length} bytes)`, wrap);
+  card(`${hex(id)} — ${name} (${bytes.length} bytes)`,
+       el("div", { class: "row", style: "margin-bottom:4px" }, span(v.verdict, "pill")),
+       wrap);
+}
+
+// ---- summary ---------------------------------------------------------------
+function renderSummary(run) {
+  const body = el("div");
+  const t = el("table");
+  t.append(el("tr", {},
+    el("th", { text: "id" }), el("th", { text: "name" }),
+    el("th", { text: "len" }), el("th", { text: "exp" }),
+    el("th", { text: "byte0" }), el("th", { text: "framing" }),
+    el("th", { text: "complement" })));
+  for (const [k, r] of Object.entries(run.responses)) {
+    const id = r.verdict === "error" ? parseInt(k, 16) : r.reportId;
+    t.append(el("tr", {},
+      el("td", { text: k }),
+      el("td", { text: NAMES[id] || "?" }),
+      el("td", { text: r.byteLength ?? "-" }),
+      el("td", { text: r.expectedLength ?? "-" }),
+      el("td", { text: r.byte0 !== undefined ? hex(r.byte0) : "-" }),
+      el("td", { text: r.framing || r.verdict }),
+      el("td", {}, span(r.complementEnforcedOnRead ? "valid" : "not valid",
+        r.complementEnforcedOnRead ? "ok" : "muted"))));
+  }
+  body.append(t);
+  card("Summary", body);
+  return body;
+}
+
+// ---- runs bar --------------------------------------------------------------
+function renderRunsBar() {
+  runsbar.textContent = "";
+  if (!runs.length) return;
+  const d = el("div", { class: "card" });
+  d.append(el("h2", { style: "margin-top:0", text: `Captures in this file (${runs.length})` }));
+  runs.forEach((r, i) => {
+    const pid = r.device.productId;
+    d.append(el("div", {}, span(
+      `#${i + 1}  ${r.device.productName || "(no name)"}  ` +
+      `PID ${pid !== null ? hex(pid) : "?"} ` +
+      `(${KNOWN_PIDS[pid] || "unrecognised"})  ` +
+      `${Object.keys(r.responses).length} report(s)  ${r.timestamp}`, "")));
+  });
+  runsbar.append(d);
+}
+
+// ---- export ----------------------------------------------------------------
+function buildPayload() {
+  return {
+    tool: "mmo7-webhid-diagnostic",
+    toolVersion: 2,
+    generatedAt: new Date().toISOString(),
+    userAgent: navigator.userAgent,
+    readOnly: true,
+    note: "All data here was obtained with HID GET_FEATURE (receiveFeatureReport). " +
+          "No SET_FEATURE / write call was made.",
+    expectedTable: EXPECTED,
+    runs
+  };
+}
+
+function ensureExportBar() {
+  if (exportbar.childElementCount) return;
+  const d = el("div", { class: "card" });
+  const row = el("div", { class: "row" });
+  const dl = el("button", { text: "Download JSON file" });
+  const cp = el("button", { class: "ghost", text: "Copy JSON to clipboard" });
+  const show = el("button", { class: "ghost", text: "Show JSON" });
+  dl.onclick = () => {
+    try {
+      const text = JSON.stringify(buildPayload(), null, 2);
+      const name = `mmo7-${new Date().toISOString().replace(/[:.]/g, "-")}.json`;
+      const url = URL.createObjectURL(new Blob([text], { type: "application/json" }));
+      const a = el("a", { href: url, download: name });
+      document.body.append(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 10000);
+      say(`Downloaded ${name}`, "ok");
+    } catch (e) { say("Download failed: " + e.message, "err"); }
+  };
+  cp.onclick = async () => {
+    try {
+      await navigator.clipboard.writeText(JSON.stringify(buildPayload(), null, 2));
+      say("JSON copied to clipboard.", "ok");
+    } catch (e) { say("Clipboard unavailable: " + e.message + " — use Download or Show JSON.", "warn"); }
+  };
+  show.onclick = () => {
+    out.querySelectorAll(".json-dump").forEach(n => n.remove());
+    const d2 = el("div", { class: "card json-dump" });
+    d2.append(el("h2", { style: "margin-top:0", text: "JSON" }));
+    d2.append(pre(JSON.stringify(buildPayload(), null, 2)));
+    out.append(d2);
+  };
+  row.append(dl, cp, show);
+  d.append(el("h2", { style: "margin-top:0", text: "Export" }), row);
+  exportbar.append(d);
 }
 
 // ---- reference card --------------------------------------------------------
@@ -248,8 +469,10 @@ function buildCheatsheet() {
     ["Framing", el("span", { text: "byte0 = report ID, byte1 = length, then each data byte followed by its bitwise complement" })],
     ["Poll-rate encoding", el("span", { text: "byte = 1000 / Hz  (125->8, 250->4, 500->2, 1000->1)" })]
   ]));
-  body.append(el("div", { class: "muted", style: "margin-top:12px",
-    text: "This run tells us: the real report IDs and sizes from the descriptor (our biggest unknown), whether the two-byte header holds in the read direction, and whether the returned buffer includes the report ID as a leading byte." }));
+  body.append(el("div", { class: "muted", style: "margin-top:12px", text:
+    "This run answers Q1 (real report IDs and sizes, from the descriptor), Q2 (does " +
+    "the response include the report ID as byte 0), Q3 (is byte 1 really a length) and " +
+    "Q4 (do the complement bytes validate on read — the single most important answer)." }));
   const d = el("div", { class: "card" });
   d.append(el("h2", { style: "margin-top:0", text: "What we already know (from the Windows DLL)" }));
   d.append(body);
@@ -260,74 +483,91 @@ buildCheatsheet();
 // ---- wiring ----------------------------------------------------------------
 document.querySelector("#connect").onclick = async () => {
   try {
-    out.textContent = "";
     if (!("hid" in navigator)) {
       say("WebHID is not available. Use Chrome, Edge or Opera (not Firefox).", "err");
       return;
     }
-    const devs = await navigator.hid.requestDevice({ filters: [{ vendorId: VID }] });
+    const filters = document.querySelector("#anyvid").checked ? [] : [{ vendorId: VID }];
+    const devs = await navigator.hid.requestDevice(filters.length ? { filters } : {});
     if (!devs.length) { say("No device selected.", "warn"); return; }
     device = devs[0];
     if (!device.opened) await device.open();
 
-    say(`Connected: ${device.productName || "(no name)"} — ` +
-        `VID 0x${device.vendorId.toString(16)} PID 0x${device.productId.toString(16)}`, "ok");
+    const pid = device.productId;
+    say(`Connected: ${device.productName || "(no name)"} — VID ${hex(device.vendorId)} PID ${hex(pid)}`, "ok");
 
-    const statusCell = KNOWN_PIDS.includes(device.productId)
-      ? span(device.productId === 0x0C19 ? "recognised (wired)" : "recognised (2.4 GHz dongle)", "ok")
+    current = {
+      timestamp: new Date().toISOString(),
+      device: {
+        productName: device.productName || "",
+        vendorId: device.vendorId,
+        productId: pid,
+        connection: KNOWN_PIDS[pid] || "unrecognised"
+      },
+      collections: collectDescriptor(device),
+      declaredFeatureIds: declaredFeatureIds(device),
+      responses: {}
+    };
+    runs.push(current);
+    renderRunsBar();
+    ensureExportBar();
+
+    const statusCell = KNOWN_PIDS[pid]
+      ? span(`recognised (${KNOWN_PIDS[pid]})`, "ok")
       : span("unexpected PID — please report it", "warn");
 
     card("Device", kvTable([
       ["productName", el("span", { text: device.productName || "(empty)" })],
-      ["vendorId", el("span", { text: "0x" + device.vendorId.toString(16) })],
-      ["productId", el("span", { text: "0x" + device.productId.toString(16) })],
+      ["vendorId", el("span", { text: hex(device.vendorId) })],
+      ["productId", el("span", { text: hex(pid) })],
       ["status", statusCell]
     ]));
     dumpDescriptor(device);
     document.querySelector("#readall").disabled = false;
-    document.querySelector("#export").disabled = false;
   } catch (e) {
     say("Connect failed: " + e.message, "err");
   }
 };
 
 document.querySelector("#readall").onclick = async () => {
-  if (!device) return;
+  if (!device || !current) return;
   const btn = document.querySelector("#readall");
   btn.disabled = true;
-  const ids = Object.keys(EXPECTED).map(Number).sort((a, b) => a - b);
-  for (const id of ids) {
+
+  // Read every feature report the device declares, plus our expected table
+  // (so an unimplemented-but-declared id is still probed). This is what makes
+  // the run informative even if the device disagrees with PROTOCOL.md.
+  const targets = Array.from(new Set([
+    ...current.declaredFeatureIds,
+    ...Object.keys(EXPECTED).map(Number)
+  ])).sort((a, b) => a - b);
+
+  if (targets.length > MAX_TARGETS) {
+    card("Note", el("div", { class: "warn", text:
+      `device declares ${targets.length} feature report ids; only the first ${MAX_TARGETS} will be read` }));
+  }
+  const sweep = targets.slice(0, MAX_TARGETS);
+
+  for (const id of sweep) {
+    const key = hex(id);
     try {
-      renderReport(id, await readReport(id));
+      const bytes = await readReport(id);
+      const v = analyse(id, bytes);
+      current.responses[key] = { ...v, bytes: Array.from(bytes) };
+      renderReport(id, bytes, v);
     } catch (e) {
-      card(`0x${id.toString(16).padStart(2, "0")} — ${NAMES[id] || "?"}`,
+      current.responses[key] = {
+        reportId: id, verdict: "error", error: e.message, expectedLength: EXPECTED[id] ?? null
+      };
+      card(`${hex(id)} — ${NAMES[id] || "not in our table"}`,
         el("div", { class: "err", text: "read failed: " + e.message }));
     }
   }
-  say("Read-only sweep complete. Nothing was written to the mouse.", "ok");
+  renderSummary(current);
+  renderRunsBar();
+  say("Read-only sweep complete. Nothing was written to the mouse. " +
+      "Use “Download JSON file” to save this capture.", "ok");
   btn.disabled = false;
-};
-
-document.querySelector("#export").onclick = async () => {
-  const payload = {
-    productName: device ? device.productName : null,
-    vendorId: device ? device.vendorId : null,
-    productId: device ? device.productId : null,
-    collections: device ? device.collections.map(c => ({
-      usagePage: c.usagePage, usage: c.usage, type: c.type,
-      feature: c.featureReports.map(r => r.reportId),
-      input: c.inputReports.map(r => r.reportId),
-      output: c.outputReports.map(r => r.reportId)
-    })) : [],
-    responses: results
-  };
-  const text = JSON.stringify(payload, null, 2);
-  try {
-    await navigator.clipboard.writeText(text);
-    say("JSON copied to clipboard.", "ok");
-  } catch {
-    card("Export", pre(text));
-  }
 };
 </script>
 </body>

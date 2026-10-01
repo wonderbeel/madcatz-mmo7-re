@@ -39,18 +39,23 @@ distributions already allow this; if the device picker is empty, see
 1. **Connect to mouse** → pick the M.M.O. 7+ (try both USB-C and the 2.4 GHz
    dongle if you have both — they have different PIDs)
 2. **Read all reports**
-3. **Export JSON** → copies a report to the clipboard
+3. **Download JSON file** → saves one file containing every capture so far
+   (there is also a clipboard button; the file download is the reliable one)
 
 ## What it captures
 
 - Device identity (VID, PID, product name) and whether the PID is recognised
 - The **full HID report descriptor** — every collection with its feature, input
   and output report IDs, plus item sizes
-- The raw response for each of the eight known report IDs, hexdumped
+- The raw response for every declared feature report **and** each of the eight
+  known report IDs, hexdumped
 - Its own analysis per report: whether byte 0 matches the requested report ID,
   whether byte 1 matches the expected length, whether the complement pairs
-  validate, and the decoded poll rate
+  validate under both framings, and the decoded poll rate
 - A warning if the descriptor declares report IDs outside the known table
+- **Multiple captures per file** — a wired run and a dongle run both survive, so
+  you only export once
+- A per-report timeout, so one unimplemented report ID cannot hang the sweep
 
 ## What it answers
 
